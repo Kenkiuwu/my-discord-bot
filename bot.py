@@ -30,6 +30,15 @@ CHANNEL_IDS = {
 raid_groupings = {}
 TZ = timezone(timedelta(hours=2))
 
+# 🔘 View with Accept Button
+class ConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("✅ You have accepted your raid assignment!", ephemeral=True)
+
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
@@ -76,7 +85,10 @@ async def group_generation_task():
                     member = discord.utils.get(bot.get_all_members(), name=p["user"])
                     if member:
                         try:
-                            await member.send(f"📌 Group for **{raid.upper()}** on {p['day']} at {p['start_time']} ST with {p['character']}.")
+                            await member.send(
+                                f"📌 Group for **{raid.upper()}** on {p['day']} at {p['start_time']} ST with {p['character']}.",
+                                view=ConfirmView()
+                            )
                         except Exception:
                             pass
 
@@ -244,4 +256,5 @@ async def generate_groups(raid):
             await channel.send(result)
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
