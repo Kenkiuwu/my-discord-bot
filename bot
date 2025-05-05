@@ -1,4 +1,5 @@
 import discord
+import os
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
@@ -277,4 +278,4 @@ async def generate_groups(raid):
 
 
 
-bot.run("MTM2ODIzMzk2Mzk3NzcwMzU2NQ.GdEJqp.w-Ud5wpx45_LEQW-JWKKdlBrqkPkxn0UeTa6Ng")
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
