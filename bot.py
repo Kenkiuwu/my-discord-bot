@@ -54,11 +54,12 @@ class CharacterModal(discord.ui.Modal, title="Add a character"):
     ilvl = discord.ui.TextInput(label="Item Level", max_length=5)
     class_name = discord.ui.TextInput(label="Class", max_length=30)
 
-    def __init__(self, user_id, raid, count):
+    def __init__(self, user_id, raid, count, all_raids=None):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.raid = raid
         self.count = count
+        self.all_raids = all_raids or list(RAID_MIN_ILVLS.keys())
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -87,8 +88,15 @@ class CharacterModal(discord.ui.Modal, title="Add a character"):
             db[self.user_id].setdefault("raids", {}).setdefault(self.raid, []).append(character)
 
             await interaction.response.send_message(f"✅ Added: {name}, {ilvl}, {class_name} for {self.raid}", ephemeral=True)
+
             if self.count < 12:
-                await interaction.followup.send_modal(CharacterModal(self.user_id, self.raid, self.count + 1))
+                await interaction.followup.send_modal(CharacterModal(self.user_id, self.raid, self.count + 1, self.all_raids))
+            else:
+                next_index = self.all_raids.index(self.raid) + 1
+                if next_index < len(self.all_raids):
+                    next_raid = self.all_raids[next_index]
+                    await interaction.followup.send(f"Now adding characters for **{next_raid}**", ephemeral=True)
+                    await interaction.followup.send_modal(CharacterModal(self.user_id, next_raid, 1, self.all_raids))
         except ValueError:
             await interaction.response.send_message("❌ Invalid item level.", ephemeral=True)
 
@@ -132,86 +140,95 @@ async def homework(interaction: discord.Interaction):
             view.add_item(StartTime())
             await interaction.followup.send(view=view, ephemeral=True)
 
-        for raid in RAID_MIN_ILVLS:
-            await interaction.followup.send(f"Now adding characters for **{raid}**", ephemeral=True)
-            await interaction.followup.send_modal(CharacterModal(user_id, raid, 1))
+        first_raid = list(RAID_MIN_ILVLS.keys())[0]
+        await interaction.followup.send(f"Now adding characters for **{first_raid}**", ephemeral=True)
+        await interaction.followup.send_modal(CharacterModal(user_id, first_raid, 1))
     else:
         await interaction.response.send_message("⛔ Homework submission is only open from Monday 18:00 ST to Tuesday 20:00 ST.", ephemeral=True)
 
-def get_channel_id(raid):
-    return {
-        "Brelshaza Normal": 1330603021729533962,
-        "Aegir Hardmode": 1318262633811673158,
-        "Aegir Normal": 1368333245183299634,
-        "Brelshaza Hardmode": 1340771270693879859,
-    }.get(raid)
+def is_support(class_name):
+    return any(role in class_name.lower() for role in SUPPORT_KEYWORDS)
 
-async def handle_fixed_brelshaza():
-    fixed_msg = "Fixed Roster: Brelshaza Hardmode (ST 20:00 Tuesday)\n"
-    for name, cls in FIXED_ROSTER.items():
-        fixed_msg += f"- {name} ({cls})\n"
-    channel = bot.get_channel(get_channel_id("Brelshaza Hardmode"))
-    await channel.send(fixed_msg)
+def get_display_name(user_id):
+    user = bot.get_user(int(user_id))
+    return user.display_name if user else user_id
 
-async def send_to_server(group: str, channel_id: int):
-    channel = bot.get_channel(channel_id)
-    await channel.send(group)
+def group_characters(characters):
+    supports = [c for c in characters if is_support(c['class'])]
+    dps = [c for c in characters if not is_support(c['class'])]
 
-@tasks.loop(time=time(20, 0))
-async def schedule_raid():
-    now_st = datetime.utcnow() + timedelta(hours=2)
-    if now_st.weekday() != 1:
-        return
+    groups = []
+    used = set()
 
-    await handle_fixed_brelshaza()
+    # Full 8-man groups
+    while len(supports) >= 2 and len(dps) >= 6:
+        group = [supports.pop(), supports.pop()]
+        group += [dps.pop() for _ in range(6)]
+        groups.append(group)
 
-    raid_groups = {raid: {} for raid in RAID_MIN_ILVLS.keys()}
-    for user_id, data in db.items():
-        availability = data.get("availability", {})
-        for raid, characters in data.get("raids", {}).items():
-            for character in characters:
-                for day, times in availability.items():
-                    for t in times:
-                        key = f"{day} {t}"
-                        if key not in raid_groups[raid]:
-                            raid_groups[raid][key] = []
-                        raid_groups[raid][key].append((user_id, character))
+    # Partial 4-man groups (1 support + 3 DPS)
+    while len(supports) >= 1 and len(dps) >= 3:
+        group = [supports.pop()]
+        group += [dps.pop() for _ in range(3)]
+        groups.append(group)
 
-    for raid, time_slots in raid_groups.items():
-        for time_slot, members in time_slots.items():
-            supports = [m for uid, m in members if any(s in m['class'].lower() for s in SUPPORT_KEYWORDS)]
-            dps = [m for uid, m in members if all(s not in m['class'].lower() for s in SUPPORT_KEYWORDS)]
-            group_msg = f"Raid: {raid} @ {time_slot} ST\n"
-            if len(supports) >= 1 and len(dps) >= 3 and len(members) >= 8:
-                group_msg += "\n".join([f"- {m['name']} ({m['class']}, {m['ilvl']})" for uid, m in members])
-                channel_id = get_channel_id(raid)
-                if channel_id:
-                    await send_to_server(group_msg, channel_id)
-            elif len(supports) >= 1 and len(dps) >= 3:
-                group_msg += "Partial Group (4+):\n"
-                group_msg += "\n".join([f"- {m['name']} ({m['class']}, {m['ilvl']})" for uid, m in members])
-                channel_id = get_channel_id(raid)
-                if channel_id:
-                    await send_to_server(group_msg, channel_id)
+    return groups
 
-@tasks.loop(time=time(18, 0))
-async def reset_entries():
-    now_st = datetime.utcnow() + timedelta(hours=2)
-    if now_st.weekday() != 0:
-        return
-    for user_id in db:
-        db[user_id]["availability"] = {}
-        db[user_id]["raids"] = {}
-    with open(SAVE_FILE, "w") as f:
-        json.dump(db, f)
-    print("✅ Entries reset (except characters)")
+@tasks.loop(minutes=1)
+async def check_schedule():
+    now = datetime.utcnow() + timedelta(hours=2)
+    if now.weekday() == 1 and now.hour == 20 and now.minute == 0:  # Tuesday 20:00 ST
+        await post_all_groups()
+
+@check_schedule.before_loop
+async def before_check():
+    await bot.wait_until_ready()
 
 @bot.event
-async def setup_hook():
-    schedule_raid.start()
-    reset_entries.start()
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    check_schedule.start()
+
+async def post_all_groups():
+    channel_id = int(os.getenv("ANNOUNCE_CHANNEL_ID", "YOUR_CHANNEL_ID"))
+    channel = bot.get_channel(channel_id)
+
+    if channel is None:
+        print("Error: Channel not found.")
+        return
+
+    await post_brelshaza_hardmode(channel)
+
+    for raid in RAID_MIN_ILVLS.keys():
+        await post_raid_groups(channel, raid)
+
+async def post_brelshaza_hardmode(channel):
+    embed = discord.Embed(title="🟣 Brelshaza Hardmode Group", color=0x9b59b6)
+    for username, class_name in FIXED_ROSTER.items():
+        display = get_display_name(username)
+        embed.add_field(name=display, value=class_name, inline=True)
+    await channel.send(embed=embed)
+
+async def post_raid_groups(channel, raid_name):
+    characters = []
+    for user_data in db.values():
+        for char in user_data.get("raids", {}).get(raid_name, []):
+            characters.append(char)
+
+    if not characters:
+        return
+
+    groups = group_characters(characters)
+    for i, group in enumerate(groups):
+        embed = discord.Embed(title=f"{raid_name} – Group {i+1}", color=0x3498db)
+        for char in group:
+            embed.add_field(name=char["name"], value=f"{char['class']} ({char['ilvl']})", inline=True)
+        await channel.send(embed=embed)
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
+
+
 
 
 
