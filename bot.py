@@ -138,11 +138,13 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Sync failed: {e}")
     reset_task.start()
-    group_generation_task.start()
     monday_reminder.start()
 
+def is_support_class(char_class):
+    return any(keyword in char_class.lower() for keyword in SUPPORT_KEYWORDS)
+
 @tasks.loop(minutes=10)
-def reset_task():
+async def reset_task():
     now = datetime.now(TZ)
     if now.weekday() == 0 and now.hour == 18 and 0 <= now.minute < 10:
         for user, data in homework_availability.items():
