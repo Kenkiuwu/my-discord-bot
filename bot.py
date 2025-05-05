@@ -5,17 +5,36 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 import pytz
 import json
-from flask import Flask
+from flask import Flask, render_template_string, request
 import threading
 
 # 🌐 Start dummy web server for Render
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "Bot is alive!"
 
+@app.route('/dashboard')
+def dashboard():
+    user_data_html = ""
+    for uid, data in homework_availability.items():
+        user_data_html += f"<h3>{data['user']}</h3>"
+        user_data_html += f"<strong>Times:</strong> {', '.join(data['times'])}<br>"
+        chars = [f"{c['character']} ({c['class']} {c['ilvl']}) - {c['raid']}" for c in data['characters']]
+        user_data_html += f"<strong>Characters:</strong><ul>" + ''.join(f"<li>{c}</li>" for c in chars) + "</ul><hr>"
+
+    return render_template_string("""
+        <html><body>
+        <h1>Lost Ark Raid Bot Dashboard</h1>
+        {{ user_data|safe }}
+        </body></html>
+    """, user_data=user_data_html)
+
 def run_web():
     app.run(host='0.0.0.0', port=8080)
+
+threading.Thread(target=run_web).start()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -49,7 +68,8 @@ CHANNEL_IDS = {
     "brel_n": 1330603021729533962,
     "aegir_n": 1368333245183299634,
     "aegir_h": 1318262633811673158,
-    "brel_hm": 1340771270693879859
+    "brel_hm": 1340771270693879859,
+    "reminder": 1368251474286612500
 }
 
 TZ = timezone(timedelta(hours=2))
@@ -59,6 +79,28 @@ MIN_ILVL = {
     "brel_n": 1670,
     "aegir_h": 1680
 }
+
+VALID_RAIDS = list(MIN_ILVL.keys())
+
+RAID_PRIORITY = ["brel_hm", "brel_n", "aegir_h", "aegir_n"]
+
+# Tracks scheduled times per user to prevent overlaps
+def get_user_busy_times():
+    busy = {}
+    for raid, times in raid_groupings.items():
+        for time, group in times.items():
+            for member in group:
+                if member not in busy:
+                    busy[member] = []
+                busy[member].append(datetime.strptime(time, "%A %H:%M"))
+    return busy
+
+def has_time_conflict(user, target_time):
+    busy_times = get_user_busy_times().get(user, [])
+    for bt in busy_times:
+        if abs((bt - target_time).total_seconds()) < 45 * 60:
+            return True
+    return False
 
 def validate_groupings(data):
     for raid, times in data.items():
@@ -239,6 +281,13 @@ async def homework(
     homework_availability[user_id]["characters"].extend(char_list)
     save_data()
     await interaction.response.send_message(f"✅ {display_name} registered {len(char_list)} characters for {raid.name}.", ephemeral=True)
+
+@tree.command(name="dashboard_link", description="Get the link to the raid dashboard")
+async def dashboard_link(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "📊 View the dashboard here: https://my-discord-bot-b2pb.onrender.com/dashboard",
+        ephemeral=True
+    )
 
 # 🟢 Launch web server and bot
 if __name__ == "__main__":
