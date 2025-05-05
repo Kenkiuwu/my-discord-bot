@@ -211,7 +211,8 @@ async def setup_hook():
     schedule_raid.start()
     reset_entries.start()
 
-bot.run("YOUR_TOKEN")
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
 
