@@ -13,7 +13,7 @@ tree = bot.tree
 
 FIXED_ROSTER = [
     "kenkixdd", "zitroone", "pastacino", ".__james__.", "rareshandaric",
-    "beaume", "matnam", "nehdaly"
+    "beaume", "matnam", "optitv"
 ]
 
 homework_availability = {}
