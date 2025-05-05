@@ -1,10 +1,10 @@
 import discord
 import os
-import json
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 import pytz
+import json
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -17,9 +17,14 @@ FIXED_ROSTER = [
     "beaume", "matnam", "optitv"
 ]
 
-homework_availability = {}
+SUPPORT_PLAYERS = ["kenkixdd", "zitroone"]
 SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
+
+SAVE_FILE = "homework_data.json"
+
+homework_availability = {}
 previous_characters = {}
+raid_groupings = {}
 
 CHANNEL_IDS = {
     "brel_n": 1330603021729533962,
@@ -28,28 +33,27 @@ CHANNEL_IDS = {
     "aegir_h": 1318262633811673158
 }
 
-raid_groupings = {}
 TZ = timezone(timedelta(hours=2))
 
-HOMEWORK_FILE = "homework_data.json"
-GROUPINGS_FILE = "groupings_data.json"
+# Load data
+if os.path.exists(SAVE_FILE):
+    with open(SAVE_FILE, "r") as f:
+        try:
+            data = json.load(f)
+            homework_availability = data.get("homework_availability", {})
+            previous_characters = data.get("previous_characters", {})
+        except Exception:
+            print("⚠️ Failed to load saved data.")
 
+# Save data
 def save_data():
-    with open(HOMEWORK_FILE, "w") as f:
-        json.dump(homework_availability, f)
-    with open(GROUPINGS_FILE, "w") as f:
-        json.dump(raid_groupings, f)
+    with open(SAVE_FILE, "w") as f:
+        json.dump({
+            "homework_availability": homework_availability,
+            "previous_characters": previous_characters
+        }, f)
 
-def load_data():
-    global homework_availability, raid_groupings
-    if os.path.exists(HOMEWORK_FILE):
-        with open(HOMEWORK_FILE, "r") as f:
-            homework_availability = json.load(f)
-    if os.path.exists(GROUPINGS_FILE):
-        with open(GROUPINGS_FILE, "r") as f:
-            raid_groupings = json.load(f)
-
-# 🔘 View with Accept Button
+# Confirm button
 class ConfirmView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -58,10 +62,23 @@ class ConfirmView(discord.ui.View):
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("✅ You have accepted your raid assignment!", ephemeral=True)
 
+# Select menu for raids
+class RaidSelect(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.select(placeholder="Select a raid to register for", min_values=1, max_values=1, options=[
+        discord.SelectOption(label="Brelshaza Normal", value="brel_n"),
+        discord.SelectOption(label="Brelshaza Hardmode", value="brel_hm"),
+        discord.SelectOption(label="Aegir Normal", value="aegir_n"),
+        discord.SelectOption(label="Aegir Hardmode", value="aegir_h"),
+    ])
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.send_message(f"Use `/homework {select.values[0]}` to register characters for **{select.values[0]}**.", ephemeral=True)
+
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    load_data()
     try:
         synced = await tree.sync()
         print(f"🔧 Synced {len(synced)} command(s)")
@@ -78,9 +95,8 @@ async def reset_task():
         for user, data in homework_availability.items():
             if isinstance(data, dict):
                 previous_characters[user] = data.get("characters", [])
-        for user in homework_availability:
-            homework_availability[user]["characters"] = []
-
+        homework_availability.clear()
+        save_data()
         for user in previous_characters:
             member = discord.utils.get(bot.get_all_members(), name=user)
             if member:
@@ -89,7 +105,6 @@ async def reset_task():
                     await member.send(f"🔄 New week! Reuse these characters? {char_list}\nRegister again using /homework.")
                 except Exception:
                     pass
-        save_data()
 
 @tasks.loop(minutes=5)
 async def group_generation_task():
@@ -98,7 +113,6 @@ async def group_generation_task():
         await generate_groups("brel_hm")
         for raid in ["brel_n", "aegir_n", "aegir_h"]:
             await generate_groups(raid)
-
         for raid, groups in raid_groupings.items():
             for group in groups:
                 for p in group:
@@ -111,7 +125,6 @@ async def group_generation_task():
                             )
                         except Exception:
                             pass
-        save_data()
 
 @tasks.loop(hours=1)
 async def monday_reminder():
@@ -124,22 +137,6 @@ async def monday_reminder():
                         await member.send("📢 Reminder: Register availability and characters using /homework_availability and /homework. Deadline: Tuesday 8PM ST!")
                     except Exception:
                         pass
-
-@tree.command(name="admin_view_groups", description="Admin: View current groupings for all raids")
-@app_commands.checks.has_permissions(administrator=True)
-async def admin_view_groups(interaction: discord.Interaction):
-    if not raid_groupings:
-        await interaction.response.send_message("📭 No groupings generated yet.", ephemeral=True)
-        return
-
-    message = "📋 **Current Raid Groupings:**\n"
-    for raid, groups in raid_groupings.items():
-        message += f"\n**{raid.upper()}**:\n"
-        for i, group in enumerate(groups, start=1):
-            message += f"🔹 Group {i}:\n"
-            for p in group:
-                message += f"- {p['display_name']} | {p['character']} ({p['day']} at {p['start_time']} ST)\n"
-    await interaction.response.send_message(message, ephemeral=True)
 
 @tree.command(name="homework_availability", description="Set your general availability for homework raids")
 @app_commands.describe(entries="Multiple entries as 'Day Start End, Day Start End'")
@@ -156,39 +153,19 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
         await interaction.response.send_message("❌ Invalid format.", ephemeral=True)
         return
 
-    homework_availability[username] = {"availability": availability_list, "characters": []}
-    save_data()
-    await interaction.response.send_message(f"✅ {username}'s availability set for {len(availability_list)} sessions")
-
-@tree.command(name="update_availability", description="Update your availability for raids")
-@app_commands.describe(entries="Multiple entries as 'Day Start End, Day Start End'")
-async def update_availability(interaction: discord.Interaction, entries: str):
-    username = interaction.user.name
     if username not in homework_availability:
-        await interaction.response.send_message("❌ Use /homework_availability first.", ephemeral=True)
-        return
-
-    new_availability = []
-    try:
-        for entry in entries.split(","):
-            parts = entry.strip().split()
-            if len(parts) != 3:
-                raise ValueError("Invalid entry")
-            new_availability.append({"day": parts[0], "start_time": parts[1], "end_time": parts[2]})
-    except Exception:
-        await interaction.response.send_message("❌ Invalid format.", ephemeral=True)
-        return
-
-    homework_availability[username]["availability"] = new_availability
+        homework_availability[username] = {}
+    homework_availability[username]["availability"] = availability_list
+    homework_availability[username].setdefault("characters", [])
     save_data()
-    await interaction.response.send_message(f"✅ {username}'s availability updated.")
+    await interaction.response.send_message(f"✅ {username}'s availability set.", ephemeral=True)
 
 @tree.command(name="homework", description="Add characters for a specific raid")
 @app_commands.describe(raid="Raid name", characters="Characters and ilvl, e.g. 'Souleater 1670 Artillerist 1680'")
 async def homework(interaction: discord.Interaction, raid: str, characters: str):
     username = interaction.user.name
     if username not in homework_availability:
-        await interaction.response.send_message("❌ Use /homework_availability first", ephemeral=True)
+        await interaction.response.send_message("❌ Use /homework_availability first.", ephemeral=True)
         return
 
     char_list = []
@@ -202,16 +179,13 @@ async def homework(interaction: discord.Interaction, raid: str, characters: str)
 
     homework_availability[username]["characters"].extend(char_list)
     save_data()
-    await interaction.response.send_message(f"✅ Registered {len(char_list)} characters for {raid}.")
+    await interaction.response.send_message(f"✅ Registered {len(char_list)} characters for {raid}.", ephemeral=True)
 
-def time_conflict(start1, end1, start2, end2):
-    fmt = "%H:%M"
-    s1 = datetime.strptime(start1, fmt)
-    e1 = datetime.strptime(end1, fmt)
-    s2 = datetime.strptime(start2, fmt)
-    e2 = datetime.strptime(end2, fmt)
-    return abs((s1 - e2).total_seconds()) < 2700 or abs((s2 - e1).total_seconds()) < 2700
+@tree.command(name="raid_menu", description="Display a menu to choose which raid to register")
+async def raid_menu(interaction: discord.Interaction):
+    await interaction.response.send_message("📜 Choose a raid:", view=RaidSelect(), ephemeral=True)
 
+# Group generation
 async def generate_groups(raid):
     entries = []
     for user, data in homework_availability.items():
@@ -223,19 +197,38 @@ async def generate_groups(raid):
                 display_name = member.display_name if member else user
                 entries.append({"user": user, "display_name": display_name, "character": char["character"], "ilvl": char["ilvl"], "day": slot["day"], "start_time": slot["start_time"]})
 
-    supports = [e for e in entries if any(role in e["character"].lower() for role in SUPPORT_KEYWORDS)]
+    supports = [e for e in entries if any(role in e["character"].lower() for role in SUPPORT_KEYWORDS) or e["user"] in SUPPORT_PLAYERS]
     dps = [e for e in entries if e not in supports]
 
     groups = []
-    used = set()
+
     if raid == "brel_hm":
-        group = []
-        for user in FIXED_ROSTER:
-            member = discord.utils.get(bot.get_all_members(), name=user)
-            display_name = member.display_name if member else user
-            group.append({"user": user, "display_name": display_name, "character": "Fixed Role", "ilvl": "TBD", "day": "Tuesday", "start_time": "20:00"})
-        groups.append(group)
+        best_time = None
+        best_count = 0
+        fixed_times = {}
+        for user in SUPPORT_PLAYERS:
+            user_data = homework_availability.get(user, {}).get("availability", [])
+            for slot in user_data:
+                key = (slot["day"], slot["start_time"])
+                fixed_times[key] = fixed_times.get(key, 0) + 1
+
+        for (day, time), count in fixed_times.items():
+            if count == 2:
+                available_fixed = sum(1 for user in FIXED_ROSTER if any(avail["day"] == day and avail["start_time"] == time for avail in homework_availability.get(user, {}).get("availability", [])))
+                if available_fixed > best_count:
+                    best_count = available_fixed
+                    best_time = (day, time)
+
+        if best_time:
+            day, time = best_time
+            group = []
+            for user in FIXED_ROSTER:
+                member = discord.utils.get(bot.get_all_members(), name=user)
+                display_name = member.display_name if member else user
+                group.append({"user": user, "display_name": display_name, "character": "Fixed Role", "ilvl": "TBD", "day": day, "start_time": time})
+            groups.append(group)
     else:
+        used = set()
         for s in supports:
             if s["user"] in used:
                 continue
@@ -264,8 +257,6 @@ async def generate_groups(raid):
         return
 
     raid_groupings[raid] = groups
-    save_data()
-
     result = ""
     for i, group in enumerate(groups, 1):
         day = group[0]["day"]
@@ -282,5 +273,6 @@ async def generate_groups(raid):
             await channel.send(result)
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
