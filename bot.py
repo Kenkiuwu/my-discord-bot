@@ -1,11 +1,12 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import json
 import os
 import flask
 from threading import Thread
+from typing import Literal
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,8 +33,6 @@ FIXED_ROSTER = {
 }
 
 DAYS = ["Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-TIME_INTERVALS = [f"{hour:02}:{minute:02}" for hour in range(12, 24) for minute in (0, 30)]
-
 SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
 SAVE_FILE = "homework_data.json"
 db = {}
@@ -42,144 +41,7 @@ if os.path.exists(SAVE_FILE):
     with open(SAVE_FILE, "r") as f:
         db = json.load(f)
 
-class CharacterModal(discord.ui.Modal, title="Add Character"):
-    name = discord.ui.TextInput(label="Character Name", required=True, max_length=20)
-    char_class = discord.ui.TextInput(label="Class", required=True, max_length=20)
-    ilvl = discord.ui.TextInput(label="Item Level", required=True)
-
-    def __init__(self, user_id: str, raid: str):
-        super().__init__()
-        self.user_id = user_id
-        self.raid = raid
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            ilvl = int(self.ilvl.value)
-        except ValueError:
-            await interaction.response.send_message("Invalid item level.", ephemeral=True)
-            return
-
-        if ilvl < RAID_MIN_ILVLS[self.raid]:
-            await interaction.response.send_message(f"Item level too low for {self.raid}.", ephemeral=True)
-            return
-
-        user_entry = db.setdefault(self.raid, {}).setdefault(self.user_id, {"characters": [], "times": []})
-        user_entry["characters"].append({
-            "name": self.name.value,
-            "class": self.char_class.value.lower(),
-            "ilvl": ilvl
-        })
-
-        with open(SAVE_FILE, "w") as f:
-            json.dump(db, f, indent=2)
-
-        await interaction.response.send_message("Character added!", ephemeral=True)
-
-class TimeSelect(discord.ui.Select):
-    def __init__(self, raid):
-        self.raid = raid
-        options = [
-            discord.SelectOption(label=f"{day} {time}", value=f"{day} {time}")
-            for day in DAYS for time in TIME_INTERVALS
-        ]
-        super().__init__(placeholder="Select times you're available (max 5)", min_values=1, max_values=5, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        db.setdefault(self.raid, {}).setdefault(str(interaction.user.id), {"characters": [], "times": []})
-        db[self.raid][str(interaction.user.id)]["times"] = self.values
-
-        with open(SAVE_FILE, "w") as f:
-            json.dump(db, f, indent=2)
-
-        await interaction.response.send_message("Times saved! Please use `/add_character` to add characters.", ephemeral=True)
-
-class TimeSelectView(discord.ui.View):
-    def __init__(self, raid):
-        super().__init__()
-        self.add_item(TimeSelect(raid))
-
-@tree.command(name="homework", description="Register availability for a raid")
-@app_commands.describe(raid="Which raid")
-@app_commands.choices(raid=[
-    app_commands.Choice(name="Aegir Normal", value="Aegir Normal"),
-    app_commands.Choice(name="Aegir Hardmode", value="Aegir Hardmode"),
-    app_commands.Choice(name="Brelshaza Normal", value="Brelshaza Normal"),
-])
-async def homework(interaction: discord.Interaction, raid: app_commands.Choice[str]):
-    await interaction.response.send_message(
-        f"Select the times you're available for **{raid.value}** this week:", 
-        view=TimeSelectView(raid.value), ephemeral=True
-    )
-
-@tree.command(name="add_character", description="Add a character for a raid")
-@app_commands.describe(raid="Which raid")
-@app_commands.choices(raid=[
-    app_commands.Choice(name="Aegir Normal", value="Aegir Normal"),
-    app_commands.Choice(name="Aegir Hardmode", value="Aegir Hardmode"),
-    app_commands.Choice(name="Brelshaza Normal", value="Brelshaza Normal"),
-])
-async def add_character(interaction: discord.Interaction, raid: app_commands.Choice[str]):
-    await interaction.response.send_modal(CharacterModal(str(interaction.user.id), raid.value))
-
-@tasks.loop(minutes=1)
-async def auto_generate():
-    now = datetime.utcnow() + timedelta(hours=2)
-    if now.strftime("%A %H:%M") == "Tuesday 20:00":
-        channel = discord.utils.get(bot.get_all_channels(), name="homework")
-        if not channel:
-            print("No #homework channel found.")
-            return
-
-        await channel.send("Generating groups...")
-
-        await post_brelshaza_hardmode(channel)
-        for raid in db:
-            if raid != "Brelshaza Hardmode":
-                await post_groups_for_raid(channel, raid)
-
-async def post_brelshaza_hardmode(channel):
-    members = "\n".join([f"{name} - {cls}" for name, cls in FIXED_ROSTER.items()])
-    await channel.send("**Brelshaza Hardmode Fixed Group:**\n" + members)
-
-async def post_groups_for_raid(channel, raid):
-    users = db.get(raid, {})
-    support_groups = []
-    dps_pool = []
-
-    for uid, entry in users.items():
-        for char in entry["characters"]:
-            role = "support" if any(k in char["class"] for k in SUPPORT_KEYWORDS) else "dps"
-            d = {"uid": uid, "name": char["name"], "class": char["class"], "role": role}
-            if role == "support":
-                support_groups.append(d)
-            else:
-                dps_pool.append(d)
-
-    full_groups = []
-    while len(support_groups) >= 2 and len(dps_pool) >= 6:
-        group = support_groups[:2] + dps_pool[:6]
-        full_groups.append(group)
-        support_groups = support_groups[2:]
-        dps_pool = dps_pool[6:]
-
-    for i, group in enumerate(full_groups, start=1):
-        msg = f"**{raid} Group {i}:**\n"
-        for m in group:
-            member = await bot.fetch_user(int(m["uid"]))
-            msg += f"- {member.display_name}: {m['name']} ({m['class']})\n"
-        await channel.send(msg)
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-    try:
-        await tree.sync()
-    except Exception as e:
-        print(f"Command sync failed: {e}")
-    auto_generate.start()
-    keep_alive()
-
-# Flask to keep alive
+# Flask server to keep bot alive
 app = flask.Flask('')
 
 @app.route('/')
@@ -193,8 +55,171 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
+    keep_alive()
+    generate_groups.start()
+
+class CharacterModal(discord.ui.Modal, title="Add Character"):
+    name = discord.ui.TextInput(label="Character Name", required=True)
+    class_name = discord.ui.TextInput(label="Class", required=True)
+    ilvl = discord.ui.TextInput(label="Item Level", required=True)
+
+    def __init__(self, user: discord.User, raid: str):
+        super().__init__()
+        self.user = user
+        self.raid = raid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        uid = str(self.user.id)
+        if uid not in db:
+            db[uid] = {}
+        if self.raid not in db[uid]:
+            db[uid][self.raid] = {"characters": []}
+
+        try:
+            ilvl_val = int(self.ilvl.value)
+        except ValueError:
+            await interaction.response.send_message("Invalid item level.", ephemeral=True)
+            return
+
+        if ilvl_val < RAID_MIN_ILVLS[self.raid]:
+            await interaction.response.send_message(f"Item level too low for {self.raid}.", ephemeral=True)
+            return
+
+        db[uid][self.raid]["characters"].append({
+            "name": self.name.value,
+            "class": self.class_name.value.lower(),
+            "ilvl": ilvl_val
+        })
+        db[uid]["display_name"] = self.user.display_name
+
+        with open(SAVE_FILE, "w") as f:
+            json.dump(db, f, indent=2)
+
+        await interaction.response.send_message(f"Added {self.name.value} to {self.raid}.", ephemeral=True)
+
+class MultiDayTimeModal(discord.ui.Modal, title="Set Weekly Availability"):
+    def __init__(self, user: discord.User):
+        super().__init__()
+        self.user = user
+        for day in DAYS:
+            self.add_item(discord.ui.TextInput(label=f"{day} Start Time (HH:MM)", required=False))
+            self.add_item(discord.ui.TextInput(label=f"{day} End Time (HH:MM)", required=False))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        uid = str(self.user.id)
+        if uid not in db:
+            db[uid] = {}
+
+        times = []
+        for i, day in enumerate(DAYS):
+            start_input = self.children[i * 2].value
+            end_input = self.children[i * 2 + 1].value
+
+            if start_input and end_input:
+                try:
+                    start = datetime.strptime(start_input, "%H:%M")
+                    end = datetime.strptime(end_input, "%H:%M")
+                except ValueError:
+                    continue
+                current = start
+                while current <= end:
+                    times.append(f"{day} {current.strftime('%H:%M')}")
+                    current += timedelta(minutes=30)
+
+        db[uid]["times"] = times
+        db[uid]["display_name"] = self.user.display_name
+
+        with open(SAVE_FILE, "w") as f:
+            json.dump(db, f, indent=2)
+
+        await interaction.response.send_message("Availability times saved!", ephemeral=True)
+
+@tree.command(name="homework")
+async def homework(interaction: discord.Interaction):
+    await interaction.response.send_modal(MultiDayTimeModal(interaction.user))
+
+def is_support(class_name):
+    return any(support in class_name.lower() for support in SUPPORT_KEYWORDS)
+
+def group_characters(characters):
+    full_groups = []
+    partial_groups = []
+
+    supports = [c for c in characters if is_support(c['class'])]
+    dps = [c for c in characters if not is_support(c['class'])]
+
+    while len(supports) >= 2 and len(dps) >= 6:
+        group = supports[:2] + dps[:6]
+        full_groups.append(group)
+        supports = supports[2:]
+        dps = dps[6:]
+
+    while len(supports) >= 1 and len(dps) >= 3:
+        group = supports[:1] + dps[:3]
+        partial_groups.append(group)
+        supports = supports[1:]
+        dps = dps[3:]
+
+    return full_groups, partial_groups
+
+def generate_homework_groups():
+    output = ""
+    for raid in RAID_MIN_ILVLS:
+        time_availability = {}
+
+        for user, raids in db.items():
+            if raid in raids and "characters" in raids[raid] and "times" in db[user]:
+                for t in db[user]["times"]:
+                    if t not in time_availability:
+                        time_availability[t] = []
+                    for c in raids[raid]["characters"]:
+                        time_availability[t].append((user, c))
+
+        for time_slot in sorted(time_availability.keys()):
+            users_chars = time_availability[time_slot]
+            characters = [c for _, c in users_chars]
+            full, partial = group_characters(characters)
+
+            if full or partial:
+                output += f"\n**{raid} - {time_slot}**\n"
+                for i, group in enumerate(full):
+                    output += f"Full Group {i+1}: " + ", ".join(f"{c['name']} ({c['class']})" for c in group) + "\n"
+                for i, group in enumerate(partial):
+                    output += f"Partial Group {i+1}: " + ", ".join(f"{c['name']} ({c['class']})" for c in group) + "\n"
+    return output or "No groups could be formed."
+
+def post_brel_hm_group():
+    output = "**Brelshaza Hardmode Fixed Group:**\n"
+    for user, cls in FIXED_ROSTER.items():
+        output += f"{user} ({cls})\n"
+    return output
+
+@tasks.loop(minutes=1)
+def generate_groups():
+    now = datetime.utcnow() + timedelta(hours=2)
+    if now.weekday() == 1 and now.hour == 20 and now.minute == 0:
+        channel = discord.utils.get(bot.get_all_channels(), name="raid-planner")
+        if channel:
+            bot.loop.create_task(channel.send(post_brel_hm_group()))
+            bot.loop.create_task(channel.send("\n**Homework Raid Groups:**\n"))
+            bot.loop.create_task(channel.send(generate_homework_groups()))
+
+@tree.command(name="add_character")
+@app_commands.describe(raid="Select the raid")
+async def add_character(interaction: discord.Interaction, raid: Literal["Aegir Normal", "Brelshaza Normal", "Aegir Hardmode"]):
+    await interaction.response.send_modal(CharacterModal(interaction.user, raid))
+
 if __name__ == "__main__":
     bot.run(os.getenv("DISCORD_TOKEN"))
+
 
 
 
