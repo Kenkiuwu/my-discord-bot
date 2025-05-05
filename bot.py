@@ -19,6 +19,7 @@ def run_web():
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="/", intents=intents)
 tree = bot.tree
@@ -59,6 +60,16 @@ MIN_ILVL = {
     "aegir_h": 1680
 }
 
+def validate_groupings(data):
+    for raid, times in data.items():
+        if not isinstance(times, dict):
+            data[raid] = {}
+            continue
+        for t, g in list(times.items()):
+            if not isinstance(g, list):
+                del data[raid][t]
+    return data
+
 # Load data
 if os.path.exists(SAVE_FILE):
     with open(SAVE_FILE, "r") as f:
@@ -67,7 +78,7 @@ if os.path.exists(SAVE_FILE):
             homework_availability = data.get("homework_availability", {})
             previous_characters = data.get("previous_characters", {})
             available_times = data.get("available_times", [])
-            raid_groupings = data.get("raid_groupings", {})
+            raid_groupings = validate_groupings(data.get("raid_groupings", {}))
         except Exception:
             print("⚠️ Failed to load saved data.")
 
@@ -79,6 +90,17 @@ def save_data():
             "available_times": available_times,
             "raid_groupings": raid_groupings
         }, f)
+
+def group_characters_by_class(characters):
+    support_chars = []
+    dps_chars = []
+    for entry in characters:
+        cls = entry["class"].lower()
+        if any(keyword in cls for keyword in SUPPORT_KEYWORDS):
+            support_chars.append(entry)
+        else:
+            dps_chars.append(entry)
+    return support_chars, dps_chars
 
 class ConfirmView(discord.ui.View):
     def __init__(self):
@@ -120,7 +142,7 @@ async def on_ready():
     monday_reminder.start()
 
 @tasks.loop(minutes=10)
-async def reset_task():
+def reset_task():
     now = datetime.now(TZ)
     if now.weekday() == 0 and now.hour == 18 and 0 <= now.minute < 10:
         for user, data in homework_availability.items():
@@ -128,59 +150,33 @@ async def reset_task():
                 previous_characters[user] = data.get("characters", [])
         homework_availability.clear()
         save_data()
-        for user in previous_characters:
-            member = discord.utils.get(bot.get_all_members(), name=user)
-            if member:
-                try:
-                    char_list = ", ".join(c["character"] for c in previous_characters[user])
-                    await member.send(f"🔄 New week! Reuse these characters? {char_list}\nRegister again using /homework.")
-                except Exception:
-                    pass
+        for guild in bot.guilds:
+            for member in guild.members:
+                if member.bot:
+                    continue
+                uid = str(member.id)
+                if uid in previous_characters:
+                    try:
+                        char_list = ", ".join(c["character"] for c in previous_characters[uid])
+                        await member.send(f"🔄 New week! Reuse these characters? {char_list}\nRegister again using /homework.")
+                    except Exception:
+                        pass
 
-@tasks.loop(minutes=5)
-async def group_generation_task():
+@tasks.loop(minutes=10)
+async def monday_reminder():
     now = datetime.now(TZ)
-    if now.weekday() == 1 and now.hour == 20 and 0 <= now.minute < 5:
-        for raid_name, time_slots in raid_groupings.items():
-            channel_id = CHANNEL_IDS.get(raid_name)
-            if not channel_id:
-                continue
-            channel = bot.get_channel(channel_id)
+    if now.weekday() == 0 and now.hour == 19 and 0 <= now.minute < 10:
+        target_channel_id = 1368251474286612500
+        for guild in bot.guilds:
+            channel = guild.get_channel(target_channel_id)
             if not channel:
                 continue
-
-            for time_key, group in time_slots.items():
-                formatted_time = time_key.replace("_", " ")
-                display_lines = []
-                for user in group:
-                    member = discord.utils.get(channel.guild.members, name=user)
-                    username_to_display = member.display_name if member else f"{user} (not found)"
-                    display_lines.append(f"- {username_to_display}")
-                message = f"🗖️ **{raid_name.replace('_', ' ').title()} - {formatted_time}**\n" + "\n".join(display_lines)
-                await channel.send(message)
-
-@tree.command(name="homework_availability", description="Set your general availability for homework raids")
-@app_commands.describe(entries="Multiple entries as 'Day Start End, Day Start End'")
-async def homework_availability_cmd(interaction: discord.Interaction, entries: str):
-    username = interaction.user.name
-    display_name = interaction.user.display_name
-    availability_list = []
-    try:
-        for entry in entries.split(","):
-            parts = entry.strip().split()
-            if len(parts) != 3:
-                raise ValueError("Invalid entry")
-            availability_list.append({"day": parts[0], "start_time": parts[1], "end_time": parts[2]})
-    except Exception:
-        await interaction.response.send_message("❌ Invalid format.", ephemeral=True)
-        return
-
-    if username not in homework_availability:
-        homework_availability[username] = {}
-    homework_availability[username]["availability"] = availability_list
-    homework_availability[username].setdefault("characters", [])
-    save_data()
-    await interaction.response.send_message(f"✅ {display_name}'s availability set.", ephemeral=True)
+            for member in guild.members:
+                if not member.bot and channel.permissions_for(member).view_channel:
+                    try:
+                        await member.send("⏰ Raid registration is open! Use `/homework_availability` to register your times.")
+                    except:
+                        pass
 
 @tree.command(name="homework", description="Add characters for a specific raid")
 @app_commands.choices(raid=[
@@ -201,14 +197,15 @@ async def homework(
     character2_name: str = None, character2_class: str = None, character2_ilvl: int = None,
     character3_name: str = None, character3_class: str = None, character3_ilvl: int = None
 ):
-    username = interaction.user.name
+    user_id = str(interaction.user.id)
     display_name = interaction.user.display_name
     raid_value = raid.value
 
-    if username not in homework_availability:
+    if user_id not in homework_availability:
         await interaction.response.send_message("❌ Use /homework_availability first.", ephemeral=True)
         return
 
+    existing_char_names = set(c["character"].lower() for c in homework_availability[user_id]["characters"])
     char_list = []
     inputs = [
         (character1_name, character1_class, character1_ilvl),
@@ -218,6 +215,13 @@ async def homework(
 
     for name, char_class, ilvl in inputs:
         if name and char_class and ilvl:
+            name_lower = name.lower()
+            if name_lower in existing_char_names:
+                await interaction.response.send_message(
+                    f"❌ You already registered `{name}` for another raid.", ephemeral=True
+                )
+                return
+            char_class_lower = char_class.lower()
             if ilvl < MIN_ILVL[raid_value]:
                 await interaction.response.send_message(
                     f"❌ {name} does not meet ilvl requirement for {raid.name} ({MIN_ILVL[raid_value]}).", ephemeral=True
@@ -225,12 +229,12 @@ async def homework(
                 return
             char_list.append({
                 "character": name,
-                "class": char_class,
+                "class": char_class_lower,
                 "ilvl": ilvl,
                 "raid": raid_value
             })
 
-    homework_availability[username]["characters"].extend(char_list)
+    homework_availability[user_id]["characters"].extend(char_list)
     save_data()
     await interaction.response.send_message(f"✅ {display_name} registered {len(char_list)} characters for {raid.name}.", ephemeral=True)
 
@@ -238,6 +242,7 @@ async def homework(
 if __name__ == "__main__":
     threading.Thread(target=run_web).start()
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
 
