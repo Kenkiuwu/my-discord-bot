@@ -1,5 +1,6 @@
 import discord
 import os
+import json
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,24 @@ CHANNEL_IDS = {
 raid_groupings = {}
 TZ = timezone(timedelta(hours=2))
 
+HOMEWORK_FILE = "homework_data.json"
+GROUPINGS_FILE = "groupings_data.json"
+
+def save_data():
+    with open(HOMEWORK_FILE, "w") as f:
+        json.dump(homework_availability, f)
+    with open(GROUPINGS_FILE, "w") as f:
+        json.dump(raid_groupings, f)
+
+def load_data():
+    global homework_availability, raid_groupings
+    if os.path.exists(HOMEWORK_FILE):
+        with open(HOMEWORK_FILE, "r") as f:
+            homework_availability = json.load(f)
+    if os.path.exists(GROUPINGS_FILE):
+        with open(GROUPINGS_FILE, "r") as f:
+            raid_groupings = json.load(f)
+
 # 🔘 View with Accept Button
 class ConfirmView(discord.ui.View):
     def __init__(self):
@@ -42,6 +61,7 @@ class ConfirmView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    load_data()
     try:
         synced = await tree.sync()
         print(f"🔧 Synced {len(synced)} command(s)")
@@ -55,7 +75,6 @@ async def on_ready():
 async def reset_task():
     now = datetime.now(TZ)
     if now.weekday() == 0 and now.hour == 18 and 0 <= now.minute < 10:
-        homework_availability.clear()
         for user, data in homework_availability.items():
             if isinstance(data, dict):
                 previous_characters[user] = data.get("characters", [])
@@ -70,6 +89,7 @@ async def reset_task():
                     await member.send(f"🔄 New week! Reuse these characters? {char_list}\nRegister again using /homework.")
                 except Exception:
                     pass
+        save_data()
 
 @tasks.loop(minutes=5)
 async def group_generation_task():
@@ -91,6 +111,7 @@ async def group_generation_task():
                             )
                         except Exception:
                             pass
+        save_data()
 
 @tasks.loop(hours=1)
 async def monday_reminder():
@@ -136,6 +157,7 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
         return
 
     homework_availability[username] = {"availability": availability_list, "characters": []}
+    save_data()
     await interaction.response.send_message(f"✅ {username}'s availability set for {len(availability_list)} sessions")
 
 @tree.command(name="update_availability", description="Update your availability for raids")
@@ -158,6 +180,7 @@ async def update_availability(interaction: discord.Interaction, entries: str):
         return
 
     homework_availability[username]["availability"] = new_availability
+    save_data()
     await interaction.response.send_message(f"✅ {username}'s availability updated.")
 
 @tree.command(name="homework", description="Add characters for a specific raid")
@@ -178,6 +201,7 @@ async def homework(interaction: discord.Interaction, raid: str, characters: str)
         return
 
     homework_availability[username]["characters"].extend(char_list)
+    save_data()
     await interaction.response.send_message(f"✅ Registered {len(char_list)} characters for {raid}.")
 
 def time_conflict(start1, end1, start2, end2):
@@ -240,6 +264,8 @@ async def generate_groups(raid):
         return
 
     raid_groupings[raid] = groups
+    save_data()
+
     result = ""
     for i, group in enumerate(groups, 1):
         day = group[0]["day"]
