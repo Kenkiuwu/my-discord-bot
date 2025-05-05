@@ -220,7 +220,7 @@ async def add_character(interaction: discord.Interaction, raid: Literal["Aegir N
     await interaction.response.send_modal(CharacterModal(interaction.user, raid))
 
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
 
 
 
