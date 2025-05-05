@@ -5,8 +5,8 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 import pytz
 import json
-from flask import Flask  # 👈 Added for web server
-import threading         # 👈 Added for running web server in background
+from flask import Flask
+import threading
 
 # 🌐 Start dummy web server for Render
 app = Flask(__name__)
@@ -23,10 +23,16 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 tree = bot.tree
 
-FIXED_ROSTER = [
-    "kenkixdd", "zitroone", "pastacino", ".__james__.", "rareshandaric",
-    "beaume", "matnam", "optitv"
-]
+FIXED_ROSTER = {
+    "kenkixdd": "Paladin",
+    "zitroone": "Artist",
+    "pastacino": "Sorc",
+    ".__james__.": "Blade",
+    "rareshandaric": "Sorc",
+    "beaume": "Souleater",
+    "matnam": "Arcana",
+    "optitv": "Destroyer"
+}
 
 SUPPORT_PLAYERS = ["kenkixdd", "zitroone"]
 SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
@@ -39,12 +45,18 @@ raid_groupings = {}
 
 CHANNEL_IDS = {
     "brel_n": 1330603021729533962,
-    "brel_hm": 1340771270693879859,
     "aegir_n": 1368333245183299634,
-    "aegir_h": 1318262633811673158
+    "aegir_h": 1318262633811673158,
+    "brel_hm": 1340771270693879859
 }
 
 TZ = timezone(timedelta(hours=2))
+
+MIN_ILVL = {
+    "aegir_n": 1660,
+    "brel_n": 1670,
+    "aegir_h": 1680
+}
 
 # Load data
 if os.path.exists(SAVE_FILE):
@@ -54,9 +66,8 @@ if os.path.exists(SAVE_FILE):
             homework_availability = data.get("homework_availability", {})
             previous_characters = data.get("previous_characters", {})
         except Exception:
-            print("⚠️ Failed to load saved data.")
+            print("\u26a0\ufe0f Failed to load saved data.")
 
-# Save data
 def save_data():
     with open(SAVE_FILE, "w") as f:
         json.dump({
@@ -64,37 +75,34 @@ def save_data():
             "previous_characters": previous_characters
         }, f)
 
-# Confirm button
 class ConfirmView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("✅ You have accepted your raid assignment!", ephemeral=True)
+        await interaction.response.send_message("\u2705 You have accepted your raid assignment!", ephemeral=True)
 
-# Select menu for raids
 class RaidSelect(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.select(placeholder="Select a raid to register for", min_values=1, max_values=1, options=[
         discord.SelectOption(label="Brelshaza Normal", value="brel_n"),
-        discord.SelectOption(label="Brelshaza Hardmode", value="brel_hm"),
         discord.SelectOption(label="Aegir Normal", value="aegir_n"),
         discord.SelectOption(label="Aegir Hardmode", value="aegir_h"),
     ])
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await interaction.response.send_message(f"Use `/homework {select.values[0]}` to register characters for **{select.values[0]}**.", ephemeral=True)
+        await interaction.response.send_message(f"Use `/homework raid:{select.values[0]} characters:<Class Ilvl Class Ilvl>` to register.", ephemeral=True)
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
+    print(f"\u2705 Logged in as {bot.user}")
     try:
         synced = await tree.sync()
-        print(f"🔧 Synced {len(synced)} command(s)")
+        print(f"\ud83d\udd27 Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f"❌ Sync failed: {e}")
+        print(f"\u274c Sync failed: {e}")
     reset_task.start()
     group_generation_task.start()
     monday_reminder.start()
@@ -137,6 +145,47 @@ async def group_generation_task():
                         except Exception:
                             pass
 
+async def generate_groups(raid):
+    groups = []
+    participants = []
+
+    for user, data in homework_availability.items():
+        availability = data.get("availability", [])
+        characters = data.get("characters", [])
+        for char in characters:
+            if char["raid"] == raid:
+                for slot in availability:
+                    participants.append({
+                        "user": user,
+                        "character": char["character"],
+                        "ilvl": char["ilvl"],
+                        "day": slot["day"],
+                        "start_time": slot["start_time"],
+                        "end_time": slot["end_time"]
+                    })
+
+    # Full groups first
+    while len(participants) >= 8:
+        groups.append(participants[:8])
+        participants = participants[8:]
+
+    # Partial 4-man groups with 1 support + 3 DPS
+    partials = []
+    supports = [p for p in participants if p["character"].lower() in SUPPORT_KEYWORDS]
+    dps = [p for p in participants if p not in supports]
+    while len(supports) >= 1 and len(dps) >= 3:
+        partial_group = [supports.pop(0)] + [dps.pop(0) for _ in range(3)]
+        partials.append(partial_group)
+
+    if raid not in raid_groupings:
+        raid_groupings[raid] = []
+    raid_groupings[raid].extend(groups)
+    raid_groupings[raid].extend(partials)
+
+    print(f"Generated groups for {raid.upper()}:")
+    for i, g in enumerate(groups + partials):
+        print(f"Group {i+1}: {[p['user'] + ' (' + p['character'] + ')' for p in g]}")
+
 @tasks.loop(hours=1)
 async def monday_reminder():
     now = datetime.now(TZ)
@@ -145,7 +194,7 @@ async def monday_reminder():
             for member in guild.members:
                 if not member.bot:
                     try:
-                        await member.send("📢 Reminder: Register availability and characters using /homework_availability and /homework. Deadline: Tuesday 8PM ST!")
+                        await member.send("\ud83d\udce2 Reminder: Register availability and characters using /homework_availability and /homework. Deadline: Tuesday 8PM ST!")
                     except Exception:
                         pass
 
@@ -161,7 +210,7 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
                 raise ValueError("Invalid entry")
             availability_list.append({"day": parts[0], "start_time": parts[1], "end_time": parts[2]})
     except Exception:
-        await interaction.response.send_message("❌ Invalid format.", ephemeral=True)
+        await interaction.response.send_message("\u274c Invalid format.", ephemeral=True)
         return
 
     if username not in homework_availability:
@@ -169,124 +218,43 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
     homework_availability[username]["availability"] = availability_list
     homework_availability[username].setdefault("characters", [])
     save_data()
-    await interaction.response.send_message(f"✅ {username}'s availability set.", ephemeral=True)
+    await interaction.response.send_message(f"\u2705 {username}'s availability set.", ephemeral=True)
 
 @tree.command(name="homework", description="Add characters for a specific raid")
-@app_commands.describe(raid="Raid name", characters="Characters and ilvl, e.g. 'Souleater 1670 Artillerist 1680'")
+@app_commands.describe(raid="Raid name", characters="e.g. 'Souleater 1670 Artillerist 1680'")
 async def homework(interaction: discord.Interaction, raid: str, characters: str):
     username = interaction.user.name
     if username not in homework_availability:
-        await interaction.response.send_message("❌ Use /homework_availability first.", ephemeral=True)
+        await interaction.response.send_message("\u274c Use /homework_availability first.", ephemeral=True)
+        return
+
+    if raid == "brel_hm":
+        await interaction.response.send_message("\u274c Brelshaza Hardmode is a fixed group. No registration needed.", ephemeral=True)
         return
 
     char_list = []
     try:
         parts = characters.strip().split()
         for i in range(0, len(parts), 2):
-            char_list.append({"character": parts[i], "ilvl": parts[i + 1], "raid": raid})
+            char = parts[i]
+            ilvl = int(parts[i + 1])
+            if ilvl < MIN_ILVL[raid]:
+                await interaction.response.send_message(f"\u274c {char} does not meet ilvl requirement for {raid}.", ephemeral=True)
+                return
+            char_list.append({"character": char, "ilvl": ilvl, "raid": raid})
     except Exception:
-        await interaction.response.send_message("❌ Invalid format.", ephemeral=True)
+        await interaction.response.send_message("\u274c Invalid character input.", ephemeral=True)
         return
 
     homework_availability[username]["characters"].extend(char_list)
     save_data()
-    await interaction.response.send_message(f"✅ Registered {len(char_list)} characters for {raid}.", ephemeral=True)
-
-@tree.command(name="raid_menu", description="Display a menu to choose which raid to register")
-async def raid_menu(interaction: discord.Interaction):
-    await interaction.response.send_message("📜 Choose a raid:", view=RaidSelect(), ephemeral=True)
-
-# Group generation logic
-async def generate_groups(raid):
-    entries = []
-    for user, data in homework_availability.items():
-        for char in data.get("characters", []):
-            if char["raid"] != raid:
-                continue
-            for slot in data.get("availability", []):
-                member = discord.utils.get(bot.get_all_members(), name=user)
-                display_name = member.display_name if member else user
-                entries.append({"user": user, "display_name": display_name, "character": char["character"], "ilvl": char["ilvl"], "day": slot["day"], "start_time": slot["start_time"]})
-
-    supports = [e for e in entries if any(role in e["character"].lower() for role in SUPPORT_KEYWORDS) or e["user"] in SUPPORT_PLAYERS]
-    dps = [e for e in entries if e not in supports]
-
-    groups = []
-
-    if raid == "brel_hm":
-        best_time = None
-        best_count = 0
-        fixed_times = {}
-        for user in SUPPORT_PLAYERS:
-            user_data = homework_availability.get(user, {}).get("availability", [])
-            for slot in user_data:
-                key = (slot["day"], slot["start_time"])
-                fixed_times[key] = fixed_times.get(key, 0) + 1
-
-        for (day, time), count in fixed_times.items():
-            if count == 2:
-                available_fixed = sum(1 for user in FIXED_ROSTER if any(avail["day"] == day and avail["start_time"] == time for avail in homework_availability.get(user, {}).get("availability", [])))
-                if available_fixed > best_count:
-                    best_count = available_fixed
-                    best_time = (day, time)
-
-        if best_time:
-            day, time = best_time
-            group = []
-            for user in FIXED_ROSTER:
-                member = discord.utils.get(bot.get_all_members(), name=user)
-                display_name = member.display_name if member else user
-                group.append({"user": user, "display_name": display_name, "character": "Fixed Role", "ilvl": "TBD", "day": day, "start_time": time})
-            groups.append(group)
-    else:
-        used = set()
-        for s in supports:
-            if s["user"] in used:
-                continue
-            for s2 in supports:
-                if s2["user"] in used or s2 == s:
-                    continue
-                for d in dps:
-                    if d["user"] in used or d["day"] != s["day"] or d["start_time"] != s["start_time"]:
-                        continue
-                    group = [s, s2]
-                    d_count = 0
-                    for d2 in dps:
-                        if d2["user"] in used or d2 == d:
-                            continue
-                        if d2["day"] == s["day"] and d2["start_time"] == s["start_time"]:
-                            group.append(d2)
-                            d_count += 1
-                        if d_count == 6:
-                            break
-                    if len(group) == 8:
-                        used.update(p["user"] for p in group)
-                        groups.append(group)
-                        break
-
-    if not groups:
-        return
-
-    raid_groupings[raid] = groups
-    result = ""
-    for i, group in enumerate(groups, 1):
-        day = group[0]["day"]
-        time = group[0]["start_time"]
-        raid_title = raid.replace("_", " ").title()
-        result += f"\n📆 **{raid_title} {time} {day}:**\n"
-        for p in group:
-            result += f"{p['display_name']}({p['character']} {p['ilvl']})\n"
-
-    channel_id = CHANNEL_IDS.get(raid)
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if channel:
-            await channel.send(result)
+    await interaction.response.send_message(f"\u2705 Registered {len(char_list)} characters for {raid}.", ephemeral=True)
 
 # 🟢 Launch web server and bot
 if __name__ == "__main__":
     threading.Thread(target=run_web).start()
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
 
