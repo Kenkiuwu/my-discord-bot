@@ -42,6 +42,7 @@ SAVE_FILE = "homework_data.json"
 homework_availability = {}
 previous_characters = {}
 raid_groupings = {}
+available_times = []
 
 CHANNEL_IDS = {
     "brel_n": 1330603021729533962,
@@ -65,6 +66,8 @@ if os.path.exists(SAVE_FILE):
             data = json.load(f)
             homework_availability = data.get("homework_availability", {})
             previous_characters = data.get("previous_characters", {})
+            available_times = data.get("available_times", [])
+            raid_groupings = data.get("raid_groupings", {})
         except Exception:
             print("⚠️ Failed to load saved data.")
 
@@ -72,7 +75,9 @@ def save_data():
     with open(SAVE_FILE, "w") as f:
         json.dump({
             "homework_availability": homework_availability,
-            "previous_characters": previous_characters
+            "previous_characters": previous_characters,
+            "available_times": available_times,
+            "raid_groupings": raid_groupings
         }, f)
 
 class ConfirmView(discord.ui.View):
@@ -93,7 +98,14 @@ class RaidSelect(discord.ui.View):
         discord.SelectOption(label="Aegir Hardmode", value="aegir_h"),
     ])
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await interaction.response.send_message(f"Use `/homework raid:{select.values[0]} characters:<Class Ilvl Class Ilvl>` to register.", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                f"Use `/homework raid:{select.values[0]}` and enter each character's name, class, and ilvl.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Use `/homework raid:{select.values[0]}` and enter each character's name, class, and ilvl.", ephemeral=True
+            )
 
 @bot.event
 async def on_ready():
@@ -129,38 +141,29 @@ async def reset_task():
 async def group_generation_task():
     now = datetime.now(TZ)
     if now.weekday() == 1 and now.hour == 20 and 0 <= now.minute < 5:
-        await generate_groups("brel_hm")
-        for raid in ["brel_n", "aegir_n", "aegir_h"]:
-            await generate_groups(raid)
-        for raid, groups in raid_groupings.items():
-            for group in groups:
-                for p in group:
-                    member = discord.utils.get(bot.get_all_members(), name=p["user"])
-                    if member:
-                        try:
-                            await member.send(
-                                f"📌 Group for **{raid.upper()}** on {p['day']} at {p['start_time']} ST with {p['character']}.",
-                                view=ConfirmView()
-                            )
-                        except Exception:
-                            pass
+        for raid_name, time_slots in raid_groupings.items():
+            channel_id = CHANNEL_IDS.get(raid_name)
+            if not channel_id:
+                continue
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                continue
 
-@tasks.loop(hours=1)
-async def monday_reminder():
-    now = datetime.now(TZ)
-    if now.weekday() == 0 and now.hour == 19:
-        for guild in bot.guilds:
-            for member in guild.members:
-                if not member.bot:
-                    try:
-                        await member.send("📢 Reminder: Register availability and characters using /homework_availability and /homework. Deadline: Tuesday 8PM ST!")
-                    except Exception:
-                        pass
+            for time_key, group in time_slots.items():
+                formatted_time = time_key.replace("_", " ")
+                display_lines = []
+                for user in group:
+                    member = discord.utils.get(channel.guild.members, name=user)
+                    username_to_display = member.display_name if member else f"{user} (not found)"
+                    display_lines.append(f"- {username_to_display}")
+                message = f"🗖️ **{raid_name.replace('_', ' ').title()} - {formatted_time}**\n" + "\n".join(display_lines)
+                await channel.send(message)
 
 @tree.command(name="homework_availability", description="Set your general availability for homework raids")
 @app_commands.describe(entries="Multiple entries as 'Day Start End, Day Start End'")
 async def homework_availability_cmd(interaction: discord.Interaction, entries: str):
     username = interaction.user.name
+    display_name = interaction.user.display_name
     availability_list = []
     try:
         for entry in entries.split(","):
@@ -177,7 +180,7 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
     homework_availability[username]["availability"] = availability_list
     homework_availability[username].setdefault("characters", [])
     save_data()
-    await interaction.response.send_message(f"✅ {username}'s availability set.", ephemeral=True)
+    await interaction.response.send_message(f"✅ {display_name}'s availability set.", ephemeral=True)
 
 @tree.command(name="homework", description="Add characters for a specific raid")
 @app_commands.choices(raid=[
@@ -185,9 +188,21 @@ async def homework_availability_cmd(interaction: discord.Interaction, entries: s
     app_commands.Choice(name="Aegir Normal", value="aegir_n"),
     app_commands.Choice(name="Aegir Hardmode", value="aegir_h"),
 ])
-@app_commands.describe(characters="e.g. 'Souleater 1670 Artillerist 1680'")
-async def homework(interaction: discord.Interaction, raid: app_commands.Choice[str], characters: str):
+@app_commands.describe(
+    raid="Raid to register for",
+    character1_name="Character 1 Name", character1_class="Character 1 Class", character1_ilvl="Character 1 ilvl",
+    character2_name="Character 2 Name", character2_class="Character 2 Class", character2_ilvl="Character 2 ilvl",
+    character3_name="Character 3 Name", character3_class="Character 3 Class", character3_ilvl="Character 3 ilvl"
+)
+async def homework(
+    interaction: discord.Interaction,
+    raid: app_commands.Choice[str],
+    character1_name: str, character1_class: str, character1_ilvl: int,
+    character2_name: str = None, character2_class: str = None, character2_ilvl: int = None,
+    character3_name: str = None, character3_class: str = None, character3_ilvl: int = None
+):
     username = interaction.user.name
+    display_name = interaction.user.display_name
     raid_value = raid.value
 
     if username not in homework_availability:
@@ -195,27 +210,35 @@ async def homework(interaction: discord.Interaction, raid: app_commands.Choice[s
         return
 
     char_list = []
-    try:
-        parts = characters.strip().split()
-        for i in range(0, len(parts), 2):
-            char = parts[i]
-            ilvl = int(parts[i + 1])
+    inputs = [
+        (character1_name, character1_class, character1_ilvl),
+        (character2_name, character2_class, character2_ilvl),
+        (character3_name, character3_class, character3_ilvl),
+    ]
+
+    for name, char_class, ilvl in inputs:
+        if name and char_class and ilvl:
             if ilvl < MIN_ILVL[raid_value]:
-                await interaction.response.send_message(f"❌ {char} does not meet ilvl requirement for {raid_value}.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"❌ {name} does not meet ilvl requirement for {raid.name} ({MIN_ILVL[raid_value]}).", ephemeral=True
+                )
                 return
-            char_list.append({"character": char, "ilvl": ilvl, "raid": raid_value})
-    except Exception:
-        await interaction.response.send_message("❌ Invalid character input.", ephemeral=True)
-        return
+            char_list.append({
+                "character": name,
+                "class": char_class,
+                "ilvl": ilvl,
+                "raid": raid_value
+            })
 
     homework_availability[username]["characters"].extend(char_list)
     save_data()
-    await interaction.response.send_message(f"✅ Registered {len(char_list)} characters for {raid_value}.", ephemeral=True)
+    await interaction.response.send_message(f"✅ {display_name} registered {len(char_list)} characters for {raid.name}.", ephemeral=True)
 
 # 🟢 Launch web server and bot
 if __name__ == "__main__":
     threading.Thread(target=run_web).start()
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
 
