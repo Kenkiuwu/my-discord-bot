@@ -203,14 +203,16 @@ def post_brel_hm_group():
     return output
 
 @tasks.loop(minutes=1)
-def generate_groups():
+async def generate_groups():
     now = datetime.utcnow() + timedelta(hours=2)
     if now.weekday() == 1 and now.hour == 20 and now.minute == 0:
         channel = discord.utils.get(bot.get_all_channels(), name="raid-planner")
         if channel:
-            bot.loop.create_task(channel.send(post_brel_hm_group()))
-            bot.loop.create_task(channel.send("\n**Homework Raid Groups:**\n"))
-            bot.loop.create_task(channel.send(generate_homework_groups()))
+            async def send_groups():
+                await channel.send(post_brel_hm_group())
+                await channel.send("\n**Homework Raid Groups:**\n")
+                await channel.send(generate_homework_groups())
+            bot.loop.create_task(send_groups())
 
 @tree.command(name="add_character")
 @app_commands.describe(raid="Select the raid")
@@ -218,7 +220,6 @@ async def add_character(interaction: discord.Interaction, raid: Literal["Aegir N
     await interaction.response.send_modal(CharacterModal(interaction.user, raid))
 
 if __name__ == "__main__":
-    
     bot.run(os.getenv("DISCORD_TOKEN"))
 
 
