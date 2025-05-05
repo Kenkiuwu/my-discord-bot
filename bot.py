@@ -54,11 +54,10 @@ async def on_ready():
 @bot.tree.command(name="homework", description="Submit weekly homework availability and character info.")
 async def homework(interaction: discord.Interaction):
     user_id = interaction.user.id
-    db[user_id] = {"availability": {}, "characters": []}
+    db[user_id] = {"availability": {}, "raids": {}}
 
     await interaction.response.send_message("Select your availability per day:", ephemeral=True)
 
-    # Collect availability for each day
     for day in DAYS:
         view = discord.ui.View(timeout=300)
 
@@ -74,8 +73,7 @@ async def homework(interaction: discord.Interaction):
         view.add_item(DaySelect())
         await interaction.followup.send(view=view, ephemeral=True)
 
-    # After collecting availability, prompt for character info
-    await interaction.followup.send("Now collecting your characters. Please check your DMs.", ephemeral=True)
+    await interaction.followup.send("Now collecting your characters per raid. Please check your DMs.", ephemeral=True)
     await collect_character_info(interaction.user)
 
 async def collect_character_info(user: discord.User):
@@ -83,84 +81,90 @@ async def collect_character_info(user: discord.User):
         return m.author == user and isinstance(m.channel, discord.DMChannel)
 
     try:
-        await user.send("Please enter up to 12 characters. Format: `Name, ilvl, Class`\nType `done` when finished.")
-        characters = []
+        await user.send("Now we'll assign your characters **per raid**. You can enter up to 12 characters per raid.\nFormat: `Name, ilvl, Class`\nType `done` when finished with that raid, or `skip` to skip the raid.")
 
-        while len(characters) < 12:
-            msg = await bot.wait_for('message', check=check, timeout=300)
-            if msg.content.lower() == 'done':
-                break
+        seen_characters = set()
 
-            try:
-                name, ilvl, class_name = map(str.strip, msg.content.split(","))
-                if int(ilvl) < RAID_MIN_ILVLS.get(class_name, 0):
-                    await user.send(f"Your character {name} does not meet the minimum item level for {class_name}. Please try again.")
-                    continue
-                characters.append({"name": name, "ilvl": ilvl, "class": class_name})
-                await user.send(f"Added: {name}, {ilvl}, {class_name}")
-            except ValueError:
-                await user.send("Invalid format. Please use: Name, ilvl, Class")
+        for raid in RAID_MIN_ILVLS:
+            await user.send(f"Enter characters for **{raid}** or type `skip` to skip.")
 
-        db[user.id]["characters"] = characters
-        await user.send("Character collection complete. Thanks!")
+            characters = []
+            while len(characters) < 12:
+                msg = await bot.wait_for('message', check=check, timeout=300)
+                content = msg.content.strip().lower()
+                if content == "done":
+                    break
+                if content == "skip":
+                    characters = []
+                    break
 
-        # Show confirmation message
-        confirmation_msg = f"Availability: {db[user.id]['availability']}\nCharacters: {characters}"
-        await user.send(f"Confirmation of your submission:\n{confirmation_msg}")
+                try:
+                    name, ilvl, class_name = map(str.strip, msg.content.split(","))
+                    ilvl = int(ilvl)
+                    char_key = f"{name.lower()}:{raid}"
+                    if char_key in seen_characters:
+                        await user.send(f"⚠️ `{name}` already submitted for **{raid}**. Skipping duplicate.")
+                        continue
+                    if ilvl < RAID_MIN_ILVLS[raid]:
+                        await user.send(f"⚠️ `{name}` does not meet the ilvl for **{raid}** ({RAID_MIN_ILVLS[raid]}).")
+                        continue
+                    seen_characters.add(char_key)
+                    characters.append({"name": name, "ilvl": ilvl, "class": class_name})
+                    await user.send(f"✅ Added: {name}, {ilvl}, {class_name}")
+                except ValueError:
+                    await user.send("❌ Invalid format. Please use: `Name, ilvl, Class`")
+
+            if characters:
+                db[user.id]["raids"][raid] = characters
+
+        await user.send("✅ All character submissions complete. Thanks!")
+
+        summary = ""
+        for raid, chars in db[user.id]["raids"].items():
+            summary += f"\n**{raid}**:\n" + "\n".join([f"- {c['name']} ({c['class']}, {c['ilvl']})" for c in chars])
+        await user.send(f"Here’s what you submitted:\n{summary}")
 
     except Exception as e:
         await user.send(f"An error occurred: {e}")
 
-# Automatic scheduling of raid groups on Tuesday at 8:00 PM
 @tasks.loop(time=datetime.now().replace(hour=20, minute=0, second=0, microsecond=0))
 async def schedule_raid():
-    available_users = []
+    raid_groups = {raid: [] for raid in RAID_MIN_ILVLS.keys()}
+    used_users_per_raid = {raid: set() for raid in RAID_MIN_ILVLS}
+    used_characters = set()
 
-    # Filter and collect all users with their availability and character info
     for user_id, data in db.items():
         availability = data["availability"]
-        characters = data["characters"]
-        for day, times in availability.items():
-            for time in times:
-                for character in characters:
-                    raid_name = character["class"]
-                    raid_ilvl = int(character["ilvl"])
-                    # Ensure they meet raid minimum ilvl requirements
-                    if raid_name in RAID_MIN_ILVLS and raid_ilvl >= RAID_MIN_ILVLS[raid_name]:
-                        available_users.append({"user_id": user_id, "day": day, "time": time, "character": character})
+        for raid, characters in data["raids"].items():
+            if user_id in used_users_per_raid[raid]:
+                continue
+            for character in characters:
+                char_id = (character['name'].lower(), raid)
+                if char_id in used_characters:
+                    continue
+                for day, times in availability.items():
+                    for time in times:
+                        raid_groups[raid].append(f"User {user_id} - {character['name']} ({character['class']}) @ {day} {time}")
+                        used_users_per_raid[raid].add(user_id)
+                        used_characters.add(char_id)
+                        break
+                    if user_id in used_users_per_raid[raid]:
+                        break
+                if user_id in used_users_per_raid[raid]:
+                    break
 
-    # Sort users by earliest time for scheduling
-    available_users.sort(key=lambda x: (DAYS.index(x["day"]), TIME_INTERVALS.index(x["time"])))
-
-    # Create raid groups based on priority
-    raid_groups = {"Brelshaza Hardmode": [], "Brelshaza Normal": [], "Aegir Hardmode": [], "Aegir Normal": []}
-
-    for user in available_users:
-        user_id = user["user_id"]
-        raid_name = user["character"]["class"]
-        raid_time = user["time"]
-        raid_day = user["day"]
-
-        # Skip users who already have a raid assigned
-        if raid_name in ["Paladin", "Artist"] and raid_time not in FIXED_ROSTER.get("kenkixdd", []):
-            continue  # Paladin gets priority only for Brelshaza Hardmode, others are skipped
-
-        raid_groups[raid_name].append(f"User {user_id} - {raid_time}")
-
-    # Send the raid groups and timings to the server channels
     await send_to_server(raid_groups["Brelshaza Hardmode"], 1340771270693879859)
     await send_to_server(raid_groups["Brelshaza Normal"], 1330603021729533962)
     await send_to_server(raid_groups["Aegir Hardmode"], 1318262633811673158)
     await send_to_server(raid_groups["Aegir Normal"], 1368333245183299634)
 
 async def send_to_server(group: list, channel_id: int):
-    # Send the generated raid groups to the server
-    channel = bot.get_channel(channel_id)  # Send to specific raid channel
+    channel = bot.get_channel(channel_id)
     raid_message = f"Raid scheduled:\n" + "\n".join(group)
     await channel.send(raid_message)
 
-# Run the bot
 bot.run("YOUR_TOKEN")
+
 
 
 
