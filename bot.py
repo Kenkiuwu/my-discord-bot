@@ -5,6 +5,17 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 import pytz
 import json
+from flask import Flask  # 👈 Added for web server
+import threading         # 👈 Added for running web server in background
+
+# 🌐 Start dummy web server for Render
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -185,7 +196,7 @@ async def homework(interaction: discord.Interaction, raid: str, characters: str)
 async def raid_menu(interaction: discord.Interaction):
     await interaction.response.send_message("📜 Choose a raid:", view=RaidSelect(), ephemeral=True)
 
-# Group generation
+# Group generation logic
 async def generate_groups(raid):
     entries = []
     for user, data in homework_availability.items():
@@ -272,7 +283,11 @@ async def generate_groups(raid):
         if channel:
             await channel.send(result)
 
-bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+# 🟢 Launch web server and bot
+if __name__ == "__main__":
+    threading.Thread(target=run_web).start()
+    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
 
 
 
