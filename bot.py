@@ -36,7 +36,6 @@ SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
 SAVE_FILE = "homework_data.json"
 db = {}
 
-# Load persistent data if available
 if os.path.exists(SAVE_FILE):
     with open(SAVE_FILE, "r") as f:
         db = json.load(f)
@@ -97,7 +96,7 @@ class CharacterModal(discord.ui.Modal, title="Add a character"):
 async def homework(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     now_st = datetime.utcnow() + timedelta(hours=2)
-    if now_st.weekday() == 0 and now_st.hour >= 19 or now_st.weekday() == 1 and now_st.hour < 20:
+    if now_st.weekday() == 0 and now_st.hour >= 18 or now_st.weekday() == 1 and now_st.hour < 20:
         db[user_id] = {"availability": {}, "raids": {}, "characters": db.get(user_id, {}).get("characters", {})}
         await interaction.response.send_message("Select your availability per day (time range):", ephemeral=True)
 
@@ -107,7 +106,7 @@ async def homework(interaction: discord.Interaction):
             class StartTime(discord.ui.Select):
                 def __init__(self):
                     options = [discord.SelectOption(label=time, value=time) for time in TIME_INTERVALS]
-                    super().__init__(placeholder=f"{day} start time", min_values=1, max_values=1, options=options, custom_id=f"start_{day}")
+                    super().__init__(placeholder=f"{day} start time", min_values=1, max_values=1, options=options)
 
                 async def callback(self, select_interaction: discord.Interaction):
                     view.stop()
@@ -119,7 +118,7 @@ async def homework(interaction: discord.Interaction):
                     class EndTime(discord.ui.Select):
                         def __init__(self):
                             options = [discord.SelectOption(label=time, value=time) for time in TIME_INTERVALS if time > start_time]
-                            super().__init__(placeholder=f"{day} end time", min_values=1, max_values=1, options=options, custom_id=f"end_{day}")
+                            super().__init__(placeholder=f"{day} end time", min_values=1, max_values=1, options=options)
 
                         async def callback(self2, select_interaction2: discord.Interaction):
                             end_time = self2.values[0]
@@ -137,20 +136,21 @@ async def homework(interaction: discord.Interaction):
             await interaction.followup.send(f"Now adding characters for **{raid}**", ephemeral=True)
             await interaction.followup.send_modal(CharacterModal(user_id, raid, 1))
     else:
-        await interaction.response.send_message("⛔ Homework submission is only open from Monday 19:00 ST to Tuesday 20:00 ST.", ephemeral=True)
+        await interaction.response.send_message("⛔ Homework submission is only open from Monday 18:00 ST to Tuesday 20:00 ST.", ephemeral=True)
 
 def get_channel_id(raid):
     return {
         "Brelshaza Normal": 1330603021729533962,
         "Aegir Hardmode": 1318262633811673158,
         "Aegir Normal": 1368333245183299634,
+        "Brelshaza Hardmode": 1340771270693879859,
     }.get(raid)
 
 async def handle_fixed_brelshaza():
-    fixed_msg = "Fixed Roster: Brelshaza Hardmode (ST 20:00 Wednesday)\n"
+    fixed_msg = "Fixed Roster: Brelshaza Hardmode (ST 20:00 Tuesday)\n"
     for name, cls in FIXED_ROSTER.items():
         fixed_msg += f"- {name} ({cls})\n"
-    channel = bot.get_channel(1340771270693879859)
+    channel = bot.get_channel(get_channel_id("Brelshaza Hardmode"))
     await channel.send(fixed_msg)
 
 async def send_to_server(group: str, channel_id: int):
@@ -162,6 +162,8 @@ async def schedule_raid():
     now_st = datetime.utcnow() + timedelta(hours=2)
     if now_st.weekday() != 1:
         return
+
+    await handle_fixed_brelshaza()
 
     raid_groups = {raid: {} for raid in RAID_MIN_ILVLS.keys()}
     for user_id, data in db.items():
@@ -191,8 +193,6 @@ async def schedule_raid():
                 channel_id = get_channel_id(raid)
                 if channel_id:
                     await send_to_server(group_msg, channel_id)
-
-    await handle_fixed_brelshaza()
 
 @tasks.loop(time=time(18, 0))
 async def reset_entries():
