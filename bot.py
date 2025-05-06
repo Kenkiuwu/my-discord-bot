@@ -1,5 +1,5 @@
 import discord
-from discord.ext import tasks
+from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import json
 import os
@@ -11,7 +11,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = discord.Bot(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 RAID_MIN_ILVLS = {
     "Brelshaza Normal": 1670,
@@ -32,7 +32,7 @@ FIXED_ROSTER = {
 
 DAYS = ["Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
-SAVE_FILE = "homework_data.json"
+SAVE_FILE = "availability_data.json"
 db = {}
 
 if os.path.exists(SAVE_FILE):
@@ -56,13 +56,24 @@ def keep_alive():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    try:
-        synced = await bot.sync_commands()
-        print(f"Synced {len(synced)} commands")
-    except Exception as e:
-        print(f"Error syncing commands: {e}")
     keep_alive()
     generate_groups.start()
+
+class ContinueAddingView(discord.ui.View):
+    def __init__(self, user: discord.User, raid: str):
+        super().__init__(timeout=60)
+        self.user = user
+        self.raid = raid
+
+    @discord.ui.button(label="Add Another Character", style=discord.ButtonStyle.primary)
+    async def add_more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CharacterModal(self.user, self.raid))
+        self.stop()
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.secondary)
+    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Finished adding characters.", ephemeral=True)
+        self.stop()
 
 class CharacterModal(discord.ui.Modal, title="Add Character"):
     name = discord.ui.TextInput(label="Character Name", required=True)
@@ -101,7 +112,11 @@ class CharacterModal(discord.ui.Modal, title="Add Character"):
         with open(SAVE_FILE, "w") as f:
             json.dump(db, f, indent=2)
 
-        await interaction.response.send_message(f"Added {self.name.value} to {self.raid}.", ephemeral=True)
+        await interaction.response.send_message(
+            f"Added {self.name.value} to {self.raid}.",
+            view=ContinueAddingView(self.user, self.raid),
+            ephemeral=True
+        )
 
 class MultiDayTimeModal(discord.ui.Modal, title="Set Weekly Availability"):
     def __init__(self, user: discord.User):
@@ -146,13 +161,24 @@ class MultiDayTimeModal(discord.ui.Modal, title="Set Weekly Availability"):
             print(f"Modal submission error: {e}")
             await interaction.response.send_message("Something went wrong while saving your availability.", ephemeral=True)
 
-@bot.slash_command(name="homework")
-async def homework(interaction: discord.Interaction):
+@bot.tree.command(name="availability", description="Set weekly availability for all raids")
+async def availability(interaction: discord.Interaction):
     try:
         await interaction.response.send_modal(MultiDayTimeModal(interaction.user))
     except Exception as e:
-        print(f"Error in homework command: {e}")
+        print(f"Error in availability command: {e}")
         await interaction.response.send_message("Could not open availability modal.", ephemeral=True)
+
+@bot.tree.command(name="clear_availability", description="Clear only your availability times")
+async def clear_availability(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    if uid in db and "times" in db[uid]:
+        db[uid].pop("times")
+        with open(SAVE_FILE, "w") as f:
+            json.dump(db, f, indent=2)
+        await interaction.response.send_message("Your availability times have been cleared.", ephemeral=True)
+    else:
+        await interaction.response.send_message("You have no availability times to clear.", ephemeral=True)
 
 def is_support(class_name):
     return any(support in class_name.lower() for support in SUPPORT_KEYWORDS)
@@ -183,19 +209,25 @@ def generate_homework_groups():
     for raid in RAID_MIN_ILVLS:
         time_availability = {}
 
-        for user, raids in db.items():
-            user_data = db.get(user, {})
-            if raid in user_data and isinstance(user_data[raid], dict) and "characters" in user_data[raid] and "times" in user_data:
-                display_name = user_data.get("display_name", user)
-                for t in user_data["times"]:
-                    if t not in time_availability:
-                        time_availability[t] = []
-                    for c in user_data.get(raid, {}).get("characters", []):
-                        time_availability[t].append((display_name, c))
+        for user, user_data in db.items():
+            if "times" not in user_data:
+                continue
+            if raid not in user_data or "characters" not in user_data[raid]:
+                continue
+
+            display_name = user_data.get("display_name", user)
+            for t in user_data["times"]:
+                if t not in time_availability:
+                    time_availability[t] = []
+                for c in user_data[raid]["characters"]:
+                    time_availability[t].append((display_name, c))
 
         for time_slot in sorted(time_availability.keys()):
             users_chars = time_availability[time_slot]
-            characters = [{"owner": display_name, **c} for display_name, c in users_chars]
+            characters = []
+            for display_name, c in users_chars:
+                if isinstance(c, dict):
+                    characters.append({"owner": display_name, **c})
             full, partial = group_characters(characters)
 
             if full or partial:
@@ -217,7 +249,7 @@ def post_brel_hm_group():
     return output
 
 @tasks.loop(minutes=1)
-async def generate_groups():
+def generate_groups():
     now = datetime.utcnow() + timedelta(hours=2)
     if now.weekday() == 1 and now.hour == 20 and now.minute == 0:
         channel = bot.get_channel(1368251474286612500)
@@ -228,12 +260,17 @@ async def generate_groups():
                 await channel.send(generate_homework_groups())
             bot.loop.create_task(send_groups())
 
-@bot.slash_command(name="add_character")
+@bot.tree.command(name="add_character", description="Add a character to a raid")
 async def add_character(interaction: discord.Interaction, raid: Literal["Aegir Normal", "Brelshaza Normal", "Aegir Hardmode"]):
     await interaction.response.send_modal(CharacterModal(interaction.user, raid))
 
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+    import asyncio
+    async def main():
+        async with bot:
+            await bot.start(os.getenv("DISCORD_TOKEN"))
+    asyncio.run(main())
+
 
 
 
