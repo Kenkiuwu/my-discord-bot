@@ -1,7 +1,6 @@
 import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-from datetime import datetime, timedelta, time
+from discord.ext import tasks
+from datetime import datetime, timedelta
 import json
 import os
 import flask
@@ -12,8 +11,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="/", intents=intents)
-tree = bot.tree
+bot = discord.Bot(intents=intents)
 
 RAID_MIN_ILVLS = {
     "Brelshaza Normal": 1670,
@@ -59,7 +57,7 @@ def keep_alive():
 async def on_ready():
     print(f"Logged in as {bot.user}")
     try:
-        synced = await bot.tree.sync()
+        synced = await bot.sync_commands()
         print(f"Synced {len(synced)} commands")
     except Exception as e:
         print(f"Error syncing commands: {e}")
@@ -114,37 +112,47 @@ class MultiDayTimeModal(discord.ui.Modal, title="Set Weekly Availability"):
             self.add_item(discord.ui.TextInput(label=f"{day} End Time (HH:MM)", required=False))
 
     async def on_submit(self, interaction: discord.Interaction):
-        uid = str(self.user.id)
-        if uid not in db:
-            db[uid] = {}
+        try:
+            uid = str(self.user.id)
+            if uid not in db:
+                db[uid] = {}
 
-        times = []
-        for i, day in enumerate(DAYS):
-            start_input = self.children[i * 2].value
-            end_input = self.children[i * 2 + 1].value
+            times = []
+            for i, day in enumerate(DAYS):
+                start_input = self.children[i * 2].value
+                end_input = self.children[i * 2 + 1].value
 
-            if start_input and end_input:
-                try:
-                    start = datetime.strptime(start_input, "%H:%M")
-                    end = datetime.strptime(end_input, "%H:%M")
-                except ValueError:
-                    continue
-                current = start
-                while current <= end:
-                    times.append(f"{day} {current.strftime('%H:%M')}")
-                    current += timedelta(minutes=30)
+                if start_input and end_input:
+                    try:
+                        start = datetime.strptime(start_input, "%H:%M")
+                        end = datetime.strptime(end_input, "%H:%M")
+                    except ValueError:
+                        continue
+                    if end < start:
+                        continue
+                    current = start
+                    while current <= end:
+                        times.append(f"{day} {current.strftime('%H:%M')}")
+                        current += timedelta(minutes=30)
 
-        db[uid]["times"] = times
-        db[uid]["display_name"] = self.user.display_name
+            db[uid]["times"] = times
+            db[uid]["display_name"] = self.user.display_name
 
-        with open(SAVE_FILE, "w") as f:
-            json.dump(db, f, indent=2)
+            with open(SAVE_FILE, "w") as f:
+                json.dump(db, f, indent=2)
 
-        await interaction.response.send_message("Availability times saved!", ephemeral=True)
+            await interaction.response.send_message("Availability times saved for all weekly raids! Use /add_character to register your alts.", ephemeral=True)
+        except Exception as e:
+            print(f"Modal submission error: {e}")
+            await interaction.response.send_message("Something went wrong while saving your availability.", ephemeral=True)
 
-@tree.command(name="homework")
+@bot.slash_command(name="homework")
 async def homework(interaction: discord.Interaction):
-    await interaction.response.send_modal(MultiDayTimeModal(interaction.user))
+    try:
+        await interaction.response.send_modal(MultiDayTimeModal(interaction.user))
+    except Exception as e:
+        print(f"Error in homework command: {e}")
+        await interaction.response.send_message("Could not open availability modal.", ephemeral=True)
 
 def is_support(class_name):
     return any(support in class_name.lower() for support in SUPPORT_KEYWORDS)
@@ -176,24 +184,30 @@ def generate_homework_groups():
         time_availability = {}
 
         for user, raids in db.items():
-            if raid in raids and "characters" in raids[raid] and "times" in db[user]:
-                for t in db[user]["times"]:
+            user_data = db.get(user, {})
+            if raid in user_data and isinstance(user_data[raid], dict) and "characters" in user_data[raid] and "times" in user_data:
+                display_name = user_data.get("display_name", user)
+                for t in user_data["times"]:
                     if t not in time_availability:
                         time_availability[t] = []
-                    for c in raids[raid]["characters"]:
-                        time_availability[t].append((user, c))
+                    for c in user_data.get(raid, {}).get("characters", []):
+                        time_availability[t].append((display_name, c))
 
         for time_slot in sorted(time_availability.keys()):
             users_chars = time_availability[time_slot]
-            characters = [c for _, c in users_chars]
+            characters = [{"owner": display_name, **c} for display_name, c in users_chars]
             full, partial = group_characters(characters)
 
             if full or partial:
                 output += f"\n**{raid} - {time_slot}**\n"
                 for i, group in enumerate(full):
-                    output += f"Full Group {i+1}: " + ", ".join(f"{c['name']} ({c['class']})" for c in group) + "\n"
+                    output += f"Full Group {i+1}: " + ", ".join(
+                        f"{c['name']} ({c['class']}, {c['owner']})" for c in group
+                    ) + "\n"
                 for i, group in enumerate(partial):
-                    output += f"Partial Group {i+1}: " + ", ".join(f"{c['name']} ({c['class']})" for c in group) + "\n"
+                    output += f"Partial Group {i+1}: " + ", ".join(
+                        f"{c['name']} ({c['class']}, {c['owner']})" for c in group
+                    ) + "\n"
     return output or "No groups could be formed."
 
 def post_brel_hm_group():
@@ -206,7 +220,7 @@ def post_brel_hm_group():
 async def generate_groups():
     now = datetime.utcnow() + timedelta(hours=2)
     if now.weekday() == 1 and now.hour == 20 and now.minute == 0:
-        channel = discord.utils.get(bot.get_all_channels(), name="raid-planner")
+        channel = bot.get_channel(1368251474286612500)
         if channel:
             async def send_groups():
                 await channel.send(post_brel_hm_group())
@@ -214,8 +228,7 @@ async def generate_groups():
                 await channel.send(generate_homework_groups())
             bot.loop.create_task(send_groups())
 
-@tree.command(name="add_character")
-@app_commands.describe(raid="Select the raid")
+@bot.slash_command(name="add_character")
 async def add_character(interaction: discord.Interaction, raid: Literal["Aegir Normal", "Brelshaza Normal", "Aegir Hardmode"]):
     await interaction.response.send_modal(CharacterModal(interaction.user, raid))
 
