@@ -59,6 +59,12 @@ async def on_ready():
     keep_alive()
     generate_groups.start()
 
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s).")
+    except Exception as e:
+        print(f"Command sync failed: {e}")
+
 class ContinueAddingView(discord.ui.View):
     def __init__(self, user: discord.User, raid: str):
         super().__init__(timeout=60)
@@ -118,53 +124,61 @@ class CharacterModal(discord.ui.Modal, title="Add Character"):
             ephemeral=True
         )
 
-class MultiDayTimeModal(discord.ui.Modal, title="Set Weekly Availability"):
-    def __init__(self, user: discord.User):
+class FirstModal(discord.ui.Modal, title="Availability (Wed-Fri)"):
+    def __init__(self, user):
         super().__init__()
         self.user = user
-        for day in DAYS:
-            self.add_item(discord.ui.TextInput(label=f"{day} Start Time (HH:MM)", required=False))
-            self.add_item(discord.ui.TextInput(label=f"{day} End Time (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Wednesday Start (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Wednesday End (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Thursday Start (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Thursday End (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Friday Start (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Friday End (HH:MM)", required=False))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SecondModal(self.user, self.children))
+
+class SecondModal(discord.ui.Modal, title="Availability (Sat-Sun)"):
+    def __init__(self, user, first_inputs):
+        super().__init__()
+        self.user = user
+        self.first_inputs = first_inputs
+        self.add_item(discord.ui.TextInput(label="Saturday Start (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Saturday End (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Sunday Start (HH:MM)", required=False))
+        self.add_item(discord.ui.TextInput(label="Sunday End (HH:MM)", required=False))
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             uid = str(self.user.id)
             if uid not in db:
                 db[uid] = {}
-
             times = []
+            entries = list(self.first_inputs) + list(self.children)
             for i, day in enumerate(DAYS):
-                start_input = self.children[i * 2].value
-                end_input = self.children[i * 2 + 1].value
-
-                if start_input and end_input:
+                start = entries[i * 2].value
+                end = entries[i * 2 + 1].value
+                if start and end:
                     try:
-                        start = datetime.strptime(start_input, "%H:%M")
-                        end = datetime.strptime(end_input, "%H:%M")
-                    except ValueError:
-                        continue
-                    if end < start:
-                        continue
-                    current = start
-                    while current <= end:
-                        times.append(f"{day} {current.strftime('%H:%M')}")
-                        current += timedelta(minutes=30)
-
+                        s = datetime.strptime(start, "%H:%M")
+                        e = datetime.strptime(end, "%H:%M")
+                        while s <= e:
+                            times.append(f"{day} {s.strftime('%H:%M')}")
+                            s += timedelta(minutes=30)
+                    except: continue
             db[uid]["times"] = times
             db[uid]["display_name"] = self.user.display_name
-
             with open(SAVE_FILE, "w") as f:
                 json.dump(db, f, indent=2)
-
-            await interaction.response.send_message("Availability times saved for all weekly raids! Use /add_character to register your alts.", ephemeral=True)
+            await interaction.response.send_message("Availability saved! Use /add_character to register characters.", ephemeral=True)
         except Exception as e:
-            print(f"Modal submission error: {e}")
-            await interaction.response.send_message("Something went wrong while saving your availability.", ephemeral=True)
+            print(e)
+            await interaction.response.send_message("Error saving availability.", ephemeral=True)
 
 @bot.tree.command(name="availability", description="Set weekly availability for all raids")
 async def availability(interaction: discord.Interaction):
     try:
-        await interaction.response.send_modal(MultiDayTimeModal(interaction.user))
+        await interaction.response.send_modal(FirstModal(interaction.user))
     except Exception as e:
         print(f"Error in availability command: {e}")
         await interaction.response.send_message("Could not open availability modal.", ephemeral=True)
