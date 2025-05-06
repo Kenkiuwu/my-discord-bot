@@ -60,6 +60,8 @@ async def on_ready():
     generate_groups.start()
 
     try:
+        # Force-clear old global commands once for sync refresh
+        bot.tree.clear_commands(guild=None)
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s).")
     except Exception as e:
