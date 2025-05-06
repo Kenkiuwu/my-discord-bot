@@ -53,6 +53,9 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+GUILD_ID = 1038251775662243870
+GUILD = discord.Object(id=GUILD_ID)
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -60,10 +63,9 @@ async def on_ready():
     generate_groups.start()
 
     try:
-        # Force-clear old global commands once for sync refresh
-        bot.tree.clear_commands(guild=None)
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s).")
+        bot.tree.clear_commands(guild=GUILD)
+        synced = await bot.tree.sync(guild=GUILD)
+        print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
     except Exception as e:
         print(f"Command sync failed: {e}")
 
@@ -177,7 +179,7 @@ class SecondModal(discord.ui.Modal, title="Availability (Sat-Sun)"):
             print(e)
             await interaction.response.send_message("Error saving availability.", ephemeral=True)
 
-@bot.tree.command(name="availability", description="Set weekly availability for all raids")
+@bot.tree.command(name="availability", description="Set weekly availability for all raids", guild=GUILD)
 async def availability(interaction: discord.Interaction):
     try:
         await interaction.response.send_modal(FirstModal(interaction.user))
@@ -185,7 +187,7 @@ async def availability(interaction: discord.Interaction):
         print(f"Error in availability command: {e}")
         await interaction.response.send_message("Could not open availability modal.", ephemeral=True)
 
-@bot.tree.command(name="clear_availability", description="Clear only your availability times")
+@bot.tree.command(name="clear_availability", description="Clear only your availability times", guild=GUILD)
 async def clear_availability(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     if uid in db and "times" in db[uid]:
