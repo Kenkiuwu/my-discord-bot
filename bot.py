@@ -210,9 +210,7 @@ def generate_homework_groups():
         time_availability = {}
 
         for user, user_data in db.items():
-            if "times" not in user_data:
-                continue
-            if raid not in user_data or "characters" not in user_data[raid]:
+            if "times" not in user_data or raid not in user_data or "characters" not in user_data[raid]:
                 continue
 
             display_name = user_data.get("display_name", user)
@@ -226,7 +224,7 @@ def generate_homework_groups():
             users_chars = time_availability[time_slot]
             characters = []
             for display_name, c in users_chars:
-                if isinstance(c, dict):
+                if isinstance(c, dict) and "class" in c and "name" in c and "ilvl" in c:
                     characters.append({"owner": display_name, **c})
             full, partial = group_characters(characters)
 
@@ -249,16 +247,14 @@ def post_brel_hm_group():
     return output
 
 @tasks.loop(minutes=1)
-def generate_groups():
+async def generate_groups():
     now = datetime.utcnow() + timedelta(hours=2)
     if now.weekday() == 1 and now.hour == 20 and now.minute == 0:
         channel = bot.get_channel(1368251474286612500)
         if channel:
-            async def send_groups():
-                await channel.send(post_brel_hm_group())
-                await channel.send("\n**Homework Raid Groups:**\n")
-                await channel.send(generate_homework_groups())
-            bot.loop.create_task(send_groups())
+            await channel.send(post_brel_hm_group())
+            await channel.send("\n**Homework Raid Groups:**\n")
+            await channel.send(generate_homework_groups())
 
 @bot.tree.command(name="add_character", description="Add a character to a raid")
 async def add_character(interaction: discord.Interaction, raid: Literal["Aegir Normal", "Brelshaza Normal", "Aegir Hardmode"]):
@@ -268,8 +264,9 @@ if __name__ == "__main__":
     import asyncio
     async def main():
         async with bot:
-            await bot.start(os.getenv("DISCORD_TOKEN"))
+            await bot.start(os.getenv("DISCORD_BOT_TOKEN"))
     asyncio.run(main())
+
 
 
 
