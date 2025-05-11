@@ -31,7 +31,7 @@ FIXED_ROSTER = {
 }
 
 DAYS = ["Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-SUPPORT_KEYWORDS = ["bard", "paladin", "artist"]
+SUPPORT_KEYWORDS = ["Bard", "Paladin", "Artist"]
 SAVE_FILE = "availability_data.json"
 db = {}
 
