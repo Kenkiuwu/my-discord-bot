@@ -128,7 +128,7 @@ class CharacterModal(discord.ui.Modal, title="Add Character"):
             ephemeral=True
         )
 
-class FirstModal(discord.ui.Modal, title="Availability (Wed-Fri)"):
+class FirstModal(discord.ui.Modal, title="Availability (Wed-Sun)"):
     def __init__(self, user):
         super().__init__()
         self.user = user
