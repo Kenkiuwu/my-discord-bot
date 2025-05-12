@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
+import os  # <-- Needed for os.getenv
 from scheduler import generate_homework_groups
 from storage import HomeworkStorage
 
@@ -39,8 +40,14 @@ async def schedule_group_generation():
         for group_msg in groups:
             await bot.get_channel(1368251474286612500).send(group_msg)
 
-await bot.start(os.getenv("DISCORD_BOT_TOKEN"))
-asyncio.run(main())  # <-- correct
+# ✅ Proper way to start the bot
+async def main():
+    async with bot:
+        await bot.start(os.getenv("DISCORD_BOT_TOKEN"))
+
+# 👇 This goes at the bottom and must be unindented
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 
