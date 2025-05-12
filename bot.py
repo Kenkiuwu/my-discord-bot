@@ -40,7 +40,8 @@ async def schedule_group_generation():
             await bot.get_channel(1368251474286612500).send(group_msg)
 
 await bot.start(os.getenv("DISCORD_BOT_TOKEN"))
-        asyncio.run(main())
+asyncio.run(main())  # <-- correct
+
 
 
 
