@@ -33,9 +33,9 @@ def generate_homework_groups(homework_data):
 
     # No filtering — include everyone
     dynamic_pool = homework_data
-     aegir_hard = []
-     brel_normal = []
-     aegir_normal = []
+    aegir_hard = []
+    brel_normal = []
+    aegir_normal = []
 
     for user, data in dynamic_pool.items():
         ilvl = max(c["ilvl"] for c in data["characters"])
